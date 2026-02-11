@@ -87,51 +87,6 @@ async function extractM3U8FromIframe(iframeUrl) {
   }
 }
 
-/* ================= QUALITIES ================= */
-
-async function extractQualities(masterUrl) {
-  try {
-    // Don't use proxy for m3u8 files (they're usually on CDN servers)
-    const res = await fetch(masterUrl, {
-      headers: getBrowserHeaders(BASE),
-    });
-
-    if (!res.ok) return [];
-
-    const text = await res.text();
-    const lines = text.split("\n");
-
-    const qualities = [];
-
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
-        const info = lines[i];
-        const next = lines[i + 1]?.trim();
-
-        const resolution =
-          info.match(/RESOLUTION=(\d+x\d+)/)?.[1] || null;
-
-        const bandwidth =
-          info.match(/BANDWIDTH=(\d+)/)?.[1] || null;
-
-        if (next) {
-          qualities.push({
-            resolution,
-            bandwidth: bandwidth ? Number(bandwidth) : null,
-            url: next.startsWith("http")
-              ? next
-              : new URL(next, masterUrl).href,
-          });
-        }
-      }
-    }
-
-    return qualities;
-  } catch {
-    return [];
-  }
-}
-
 /* ================= AUDIO TRACKS ================= */
 
 async function extractAudioTracks(masterUrl) {
@@ -181,6 +136,91 @@ async function extractAudioTracks(masterUrl) {
   }
 }
 
+/* ================= QUALITIES WITH AUDIO ================= */
+
+async function extractQualitiesWithAudio(masterUrl) {
+  try {
+    // Don't use proxy for m3u8 files (they're usually on CDN servers)
+    const res = await fetch(masterUrl, {
+      headers: getBrowserHeaders(BASE),
+    });
+
+    if (!res.ok) return { qualities: [], audioTracks: [] };
+
+    const text = await res.text();
+    const lines = text.split("\n");
+
+    // First, extract all audio tracks
+    const audioTracks = [];
+    
+    for (const line of lines) {
+      if (
+        line.startsWith("#EXT-X-MEDIA") &&
+        line.includes("TYPE=AUDIO")
+      ) {
+        const lang = line.match(/LANGUAGE="([^"]+)"/)?.[1] || null;
+        const name = line.match(/NAME="([^"]+)"/)?.[1] || null;
+        const uri = line.match(/URI="([^"]+)"/)?.[1] || null;
+        const groupId =
+          line.match(/GROUP-ID="([^"]+)"/)?.[1] || null;
+
+        const isDefault = line.includes("DEFAULT=YES");
+
+        audioTracks.push({
+          language: lang,
+          name,
+          groupId,
+          default: isDefault,
+          url: uri
+            ? uri.startsWith("http")
+              ? uri
+              : new URL(uri, masterUrl).href
+            : null,
+        });
+      }
+    }
+
+    // Now extract qualities with their associated audio
+    const qualities = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
+        const info = lines[i];
+        const next = lines[i + 1]?.trim();
+
+        const resolution =
+          info.match(/RESOLUTION=(\d+x\d+)/)?.[1] || null;
+
+        const bandwidth =
+          info.match(/BANDWIDTH=(\d+)/)?.[1] || null;
+
+        // Extract the AUDIO group reference
+        const audioGroupId = info.match(/AUDIO="([^"]+)"/)?.[1] || null;
+
+        // Filter audio tracks that belong to this quality
+        const qualityAudioTracks = audioGroupId
+          ? audioTracks.filter(track => track.groupId === audioGroupId)
+          : audioTracks; // If no specific group, include all
+
+        if (next) {
+          qualities.push({
+            resolution,
+            bandwidth: bandwidth ? Number(bandwidth) : null,
+            url: next.startsWith("http")
+              ? next
+              : new URL(next, masterUrl).href,
+            audioTracks: qualityAudioTracks,
+          });
+        }
+      }
+    }
+
+    return { qualities, audioTracks };
+  } catch {
+    return { qualities: [], audioTracks: [] };
+  }
+}
+
 /* ================= API ================= */
 
 export async function GET(req, { params }) {
@@ -191,7 +231,15 @@ export async function GET(req, { params }) {
     if (!episodeId) {
       return Response.json(
         { success: false, message: "episodeId is required" },
-        { status: 400 }
+        { 
+          status: 400,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Access-Control-Allow-Credentials': 'true'
+          }
+        }
       );
     }
 
@@ -207,7 +255,15 @@ export async function GET(req, { params }) {
     if (!res.ok) {
       return Response.json(
         { success: false, message: "Failed to fetch servers" },
-        { status: 500 }
+        { 
+          status: 500,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Access-Control-Allow-Credentials': 'true'
+          }
+        }
       );
     }
 
@@ -216,7 +272,15 @@ export async function GET(req, { params }) {
     if (!json?.status) {
       return Response.json(
         { success: false, message: "Invalid response" },
-        { status: 500 }
+        { 
+          status: 500,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Access-Control-Allow-Credentials': 'true'
+          }
+        }
       );
     }
 
@@ -265,8 +329,9 @@ export async function GET(req, { params }) {
         m3u8 = await extractM3U8FromIframe(source.link);
 
         if (m3u8) {
-          qualities = await extractQualities(m3u8);
-          audioTracks = await extractAudioTracks(m3u8);
+          const result = await extractQualitiesWithAudio(m3u8);
+          qualities = result.qualities;
+          audioTracks = result.audioTracks;
         }
       }
     }
@@ -282,8 +347,14 @@ export async function GET(req, { params }) {
         source,
         m3u8,
         qualities,
-        audioTracks,
       },
+    }, {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Credentials': 'true'
+      }
     });
   } catch (err) {
     console.error(err);
@@ -294,7 +365,15 @@ export async function GET(req, { params }) {
         message: "Failed to fetch episode servers",
         error: err.message,
       },
-      { status: 500 }
+      { 
+        status: 500,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Allow-Credentials': 'true'
+        }
+      }
     );
   }
 }
